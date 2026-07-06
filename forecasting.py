@@ -44,6 +44,8 @@ class ForecastResult:
     actual_test: pd.Series
     forecast_plot: BytesIO
     trend_plot: BytesIO
+    future_forecast: pd.DataFrame
+    future_trend_plot: BytesIO
 
 
 class DatasetValidationError(ValueError):
@@ -114,8 +116,81 @@ def load_dataset(uploaded_file) -> pd.DataFrame:
         raise DatasetValidationError("The CSV file could not be loaded. Please check the file format.") from exc
 
 
-def forecast_currency(df: pd.DataFrame, horizon: int) -> ForecastResult:
+def future_period_index(cleaned: pd.DataFrame, horizon: int) -> pd.DatetimeIndex:
+    last_month = cleaned.index.max()
+    return pd.date_range(last_month + pd.DateOffset(months=1), periods=horizon, freq="MS")
+
+
+def build_default_future_exog(cleaned: pd.DataFrame, horizon: int) -> pd.DataFrame:
+    future_index = future_period_index(cleaned, horizon)
+    future = pd.DataFrame(index=future_index)
+
+    for column in FEATURE_COLUMNS:
+        if column == "festive_month":
+            continue
+        avg_change = cleaned[column].tail(12).diff().mean()
+        if pd.isna(avg_change):
+            avg_change = 0.0
+        last_value = cleaned[column].iloc[-1]
+        values = []
+        for _ in range(horizon):
+            last_value = last_value + avg_change
+            values.append(last_value)
+        future[column] = values
+
+    festive_by_month = cleaned.groupby(cleaned.index.month)["festive_month"].agg(
+        lambda s: int(s.mode().iloc[0]) if not s.mode().empty else 0
+    )
+    future["festive_month"] = [
+        int(festive_by_month.get(month, 0)) for month in future_index.month
+    ]
+
+    return future[FEATURE_COLUMNS]
+
+
+def forecast_future(
+    cleaned: pd.DataFrame, horizon: int, future_exog: pd.DataFrame
+) -> tuple[pd.DataFrame, BytesIO]:
+    y = cleaned[TARGET_COLUMN]
+    x = cleaned[FEATURE_COLUMNS]
+
+    model = SARIMAX(
+        y,
+        exog=x,
+        order=(1, 1, 1),
+        seasonal_order=(0, 0, 0, 0),
+        enforce_stationarity=False,
+        enforce_invertibility=False,
+    )
+    model_fit = model.fit(disp=False, maxiter=200)
+
+    future_forecast = model_fit.get_forecast(steps=horizon, exog=future_exog[FEATURE_COLUMNS])
+    predictions = future_forecast.predicted_mean
+    predictions.index = future_exog.index
+    confidence_interval = future_forecast.conf_int()
+    confidence_interval.index = future_exog.index
+
+    future_df = pd.DataFrame(
+        {
+            "month": predictions.index,
+            "forecast_tzs_circulation_bn": predictions.values,
+            "lower_ci": confidence_interval.iloc[:, 0].values,
+            "upper_ci": confidence_interval.iloc[:, 1].values,
+        }
+    )
+    future_df["month"] = future_df["month"].dt.strftime("%Y-%m")
+
+    future_plot = build_forecast_trend_plot(predictions, confidence_interval)
+    return future_df, future_plot
+
+
+def forecast_currency(
+    df: pd.DataFrame, horizon: int, future_exog: pd.DataFrame | None = None
+) -> ForecastResult:
     cleaned = validate_dataset(df)
+
+    if future_exog is None:
+        future_exog = build_default_future_exog(cleaned, horizon)
 
     train, test = _split_train_test(cleaned, horizon)
 
@@ -165,6 +240,8 @@ def forecast_currency(df: pd.DataFrame, horizon: int) -> ForecastResult:
     forecast_plot = build_actual_vs_forecast_plot(y_train, y_test, predictions)
     trend_plot = build_forecast_trend_plot(predictions, confidence_interval)
 
+    future_df, future_plot = forecast_future(cleaned, horizon, future_exog)
+
     return ForecastResult(
         mae=round(float(mae), 3),
         rmse=round(rmse, 3),
@@ -174,7 +251,10 @@ def forecast_currency(df: pd.DataFrame, horizon: int) -> ForecastResult:
         actual_test=y_test,
         forecast_plot=forecast_plot,
         trend_plot=trend_plot,
+        future_forecast=future_df,
+        future_trend_plot=future_plot,
     )
+
 
 
 def build_actual_vs_forecast_plot(

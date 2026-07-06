@@ -83,6 +83,9 @@ def render_dashboard() -> None:
 
     result = st.session_state.get("result")
     if result is not None:
+        render_future_forecast(result)
+        st.divider()
+        st.subheader("Model Validation (backtest on known months)")
         render_metrics(result)
         render_charts(result)
         render_forecast_table(result)
@@ -158,6 +161,9 @@ def render_results_page() -> None:
         st.info("Run a forecast from the Dashboard page to view results.")
         return
 
+    render_future_forecast(result)
+    st.divider()
+    st.subheader("Model Validation (backtest on known months)")
     render_metrics(result)
     render_forecast_table(result)
     render_downloads(result)
@@ -188,6 +194,23 @@ def run_forecast(dataset: pd.DataFrame, horizon: int) -> None:
             "The forecast could not be completed. Please review the dataset and try again. "
             f"Details: {exc}"
         )
+
+
+def render_future_forecast(result) -> None:
+    st.subheader("Forecast — Upcoming Months")
+    st.caption(
+        "This is the model's genuine forecast for the months after your last "
+        "historical record, trained on your full dataset."
+    )
+    st.dataframe(result.future_forecast, use_container_width=True, hide_index=True)
+    st.image(result.future_trend_plot, use_container_width=True)
+    st.download_button(
+        "Download upcoming forecast CSV",
+        data=dataframe_to_csv_bytes(result.future_forecast),
+        file_name="upcoming_currency_forecast.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
 
 def render_metrics(result) -> None:
